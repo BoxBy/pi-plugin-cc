@@ -1,5 +1,5 @@
 ---
-description: "Have pi brainstorm ideas. Pi generates multiple approaches/ideas, then Claude refines and selects the best. Free compute for ideation."
+description: "Have pi brainstorm ideas. Pi generates multiple approaches/ideas, then Claude refines and selects the best."
 argument-hint: "<topic> [--count N]"
 ---
 

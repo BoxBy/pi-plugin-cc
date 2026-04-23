@@ -1,6 +1,6 @@
 # pi-plugin-cc
 
-Claude Code plugin for [pi coding agent](https://github.com/badlogic/pi-mono). Free compute for reviews, delegation, brainstorming, cross-verification, and more.
+Claude Code plugin for [pi coding agent](https://github.com/badlogic/pi-mono). Delegate reviews, brainstorming, cross-verification, and more to pi.
 
 > **Note:** This plugin is derived from [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) (Apache 2.0), adapted for pi.
 
@@ -37,7 +37,7 @@ claude plugin add --url https://github.com/BoxBy/pi-plugin-cc.git
 
 ## Routing
 
-Pi replaces expensive subagents as free compute:
+Pi can replace expensive subagent calls when running local models:
 
 | Model level | Pi replacement |
 |-------------|---------------|

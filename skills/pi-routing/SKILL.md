@@ -1,15 +1,15 @@
 ---
 name: pi-routing
-description: "Routes subagent tasks to pi when appropriate. Automatically consider pi before spawning any haiku or simple sonnet subagent. Pi is free compute — use it for read-only, review, simple generation, and brainstorming. Triggers when about to spawn a subagent with model=haiku, or when the task is READ-ONLY/REVIEW/GENERATE-SIMPLE/BRAINSTORM."
+description: "Routes subagent tasks to pi when appropriate. Automatically consider pi before spawning any haiku or simple sonnet subagent. Use pi for read-only, review, simple generation, and brainstorming. Triggers when about to spawn a subagent with model=haiku, or when the task is READ-ONLY/REVIEW/GENERATE-SIMPLE/BRAINSTORM."
 ---
 
 # Pi Routing
 
-Before spawning a subagent, check if pi can handle it (free).
+Before spawning a subagent, check if pi can handle it.
 
 ## 3-Stage Decision
 
-### Stage 1: Pi Routing (free compute)
+### Stage 1: Pi Routing
 - **haiku level** → pi, always. `pi-cc run "..."`
 - **sonnet + READ-ONLY/REVIEW/GENERATE-SIMPLE/BRAINSTORM** → pi, then sonnet reviews once
 - **sonnet + GENERATE-COMPLEX/DECIDE** → sonnet leads, pi assists via RPC

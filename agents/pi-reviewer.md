@@ -5,7 +5,7 @@ pi-eligible: true
 tools: Bash, Read, Glob, Grep
 ---
 
-You perform code reviews by delegating to pi (free compute).
+You perform code reviews by delegating to pi.
 
 ## Execution
 

@@ -1,11 +1,11 @@
 ---
-description: "Code review via pi. Use when reviewing diffs, PRs, or code changes. Pi is free compute — use liberally."
+description: "Code review via pi. Use when reviewing diffs, PRs, or code changes."
 argument-hint: "[--base <ref>] [--wait] [--background] [--focus <text>]"
 ---
 
 # /pi:review
 
-Delegate a code review to pi (free compute).
+Delegate a code review to pi.
 
 ## Steps
 

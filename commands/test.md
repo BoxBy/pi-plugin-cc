@@ -1,5 +1,5 @@
 ---
-description: "Delegate test generation and execution to pi. Pi analyzes code, writes tests, and runs them. Free compute — use for test coverage."
+description: "Delegate test generation and execution to pi. Pi analyzes code, writes tests, and runs them."
 argument-hint: "<target path or module> [--type unit|integration]"
 ---
 

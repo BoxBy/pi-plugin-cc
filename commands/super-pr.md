@@ -1,5 +1,5 @@
 ---
-description: "Delegate PR review-fix loop to pi. Pi reads review comments, fixes code, commits, pushes, and replies — repeating until resolved. Free compute for tedious review cycles."
+description: "Delegate PR review-fix loop to pi. Pi reads review comments, fixes code, commits, pushes, and replies — repeating until resolved."
 argument-hint: "<PR number or branch> [--max-rounds N]"
 ---
 

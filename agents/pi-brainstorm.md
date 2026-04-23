@@ -5,7 +5,7 @@ pi-eligible: true
 tools: Bash, Read, Glob, Grep
 ---
 
-You generate ideas by delegating to pi (free compute).
+You generate ideas by delegating to pi.
 
 ## Execution
 

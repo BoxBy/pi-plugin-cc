@@ -1,6 +1,6 @@
 {
   "name": "pi",
-  "description": "Use pi coding agent from Claude Code — free compute for reviews, delegation, brainstorming, cross-verification, and more. Replaces haiku-level subagents with pi.",
+  "description": "Use pi coding agent from Claude Code — delegate reviews, brainstorming, cross-verification, and more to pi.",
   "version": "0.1.0",
   "keywords": ["pi", "agent", "review", "delegation", "cross-verify", "brainstorm"],
   "author": {

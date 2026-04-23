@@ -1,5 +1,5 @@
 ---
-description: "Delegate codebase exploration to pi. Pi reads files, searches code, traces call chains, and reports findings. Use for 'how does X work?' questions. Free compute — use liberally."
+description: "Delegate codebase exploration to pi. Pi reads files, searches code, traces call chains, and reports findings. Use for 'how does X work?' questions."
 argument-hint: "<question about the codebase>"
 ---
 
