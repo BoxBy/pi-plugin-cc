@@ -1,0 +1,13 @@
+{
+  "name": "pi",
+  "description": "Use pi coding agent from Claude Code — free compute for reviews, delegation, brainstorming, cross-verification, and more. Replaces haiku-level subagents with pi.",
+  "version": "0.1.0",
+  "keywords": ["pi", "agent", "review", "delegation", "cross-verify", "brainstorm"],
+  "author": {
+    "name": "BoxBy",
+    "team": "BoxBy"
+  },
+  "homepage": "https://github.com/BoxBy/pi-plugin-cc",
+  "repository": "https://github.com/BoxBy/pi-plugin-cc",
+  "license": "Apache-2.0"
+}

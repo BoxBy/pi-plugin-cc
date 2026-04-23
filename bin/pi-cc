@@ -1,0 +1,452 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# pi-cc: Claude Code에서 pi를 호출하는 얇은 래퍼
+# 사용법:
+#   pi-cc run "prompt"           # 단발 실행 (JSON ��력)
+#   pi-cc run "prompt" --bg      # 백��라운드 실행 → task ID 반환
+#   pi-cc status [task-id]       # 실행 상태 조회
+#   pi-cc result <task-id>       # 결과 회수
+#   pi-cc cancel <task-id>       # 실행 취소
+#   pi-cc check                  # pi 설치/인증 확인
+
+TASK_DIR="${PI_CC_TASK_DIR:-$HOME/.pi-cc-tasks}"
+USAGE_FILE="$HOME/.pi-cc-tasks/.usage.json"
+MAX_CONCURRENT="${PI_CC_MAX_CONCURRENT:-3}"
+MODEL="${PI_CC_MODEL:-}"
+THINKING="${PI_CC_THINKING:-}"
+TIMEOUT="${PI_CC_TIMEOUT:-300}"
+
+# Caller tracking (set by PreToolUse hook pi-caller-inject.sh OR directly).
+# Writes an .active/{caller}.{pid}.json sentinel so the statusline plugin can
+# attribute current pi runs to the subagent that invoked them. Defense-in-depth:
+# hook already sanitizes, but direct invocation bypasses hook — so we re-sanitize
+# here (allowlist [A-Za-z0-9_.-], strip leading dots to block `..` path escape).
+_write_caller_active() {
+  [ -z "${PI_CC_CALLER:-}" ] && return 0
+  local safe_caller
+  safe_caller=$(printf '%s' "${PI_CC_CALLER}" | sed 's/[^A-Za-z0-9_.-]//g' | sed 's/^\.*//')
+  [ -z "$safe_caller" ] && return 0
+  local active_dir="$TASK_DIR/.active"
+  mkdir -p "$active_dir"
+  # Include PID so concurrent calls from the same caller don't stomp each other.
+  local caller_file="$active_dir/${safe_caller}.${$}.json"
+  printf '{"caller":"%s","pid":%d,"started":"%s"}\n' \
+    "${safe_caller}" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$caller_file"
+  # shellcheck disable=SC2064
+  trap "rm -f '$caller_file'" EXIT INT TERM
+}
+_write_caller_active
+
+_update_usage() {
+  # pi JSON 출력에서 usage 추출 + 실제 생성 TPS 계산 (첫 text_delta ~ text_end)
+  local output_file="$1"
+  local wall_duration="${2:-0}"
+  [[ -f "$output_file" ]] || return
+  python3 - "$output_file" "$USAGE_FILE" "$wall_duration" << 'PYEOF'
+import sys, json, time
+
+output_file, usage_file = sys.argv[1], sys.argv[2]
+wall_duration = float(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] != "0" else 0
+
+usage = None
+first_delta_ts = None
+last_end_ts = None
+user_msg_ts = None
+has_tool_use = False
+
+with open(output_file) as f:
+    for line in f:
+        try:
+            d = json.loads(line)
+        except:
+            continue
+        t = d.get("type", "")
+        # usage from agent_end + tool_use 감지
+        if t == "agent_end":
+            for msg in d.get("messages", []):
+                u = msg.get("usage")
+                if u and u.get("totalTokens", 0) > 0:
+                    usage = u
+                for c in msg.get("content", []):
+                    if c.get("type") == "tool_use":
+                        has_tool_use = True
+        # user message_start → TTFT base
+        if t == "message_start":
+            msg = d.get("message", {})
+            if msg.get("role") == "user":
+                ts = msg.get("timestamp")
+                if ts:
+                    user_msg_ts = ts / 1000.0 if ts > 1e12 else ts
+        # first text_delta timestamp (assistant)
+        if t == "message_update":
+            ae = d.get("assistantMessageEvent", {})
+            if ae.get("type") == "text_delta" and first_delta_ts is None:
+                ts = d.get("message", {}).get("timestamp")
+                if ts:
+                    first_delta_ts = ts / 1000.0 if ts > 1e12 else ts
+            if ae.get("type") == "text_end":
+                ts = d.get("message", {}).get("timestamp")
+                if ts:
+                    last_end_ts = ts / 1000.0 if ts > 1e12 else ts
+
+if not usage:
+    sys.exit(0)
+
+# TTFT = user message_start → first text_delta (밀리초)
+ttft_ms = 0
+if user_msg_ts and first_delta_ts and first_delta_ts >= user_msg_ts:
+    ttft_ms = round((first_delta_ts - user_msg_ts) * 1000)
+
+# TPS = output tokens / (wall_duration - TTFT)
+# pi(ollama)는 스트리밍 이벤트에 동일 타임스탬프를 찍으므로 wall clock 기반
+out_tok = usage.get("output", 0)
+ttft_sec = ttft_ms / 1000.0
+gen_dur = max(0, wall_duration - ttft_sec) if wall_duration > 0 else 0
+tps = round(out_tok / gen_dur, 1) if gen_dur > 0 else 0
+
+try:
+    with open(usage_file) as f:
+        cum = json.load(f)
+except:
+    cum = {"input":0,"output":0,"totalTokens":0,"tasks":0,"cost":0.0,"lastTps":0,"totalDuration":0}
+
+cum["input"] += usage.get("input", 0)
+cum["output"] += usage.get("output", 0)
+cum["totalTokens"] += usage.get("totalTokens", 0)
+cum["tasks"] = cum.get("tasks", 0) + 1
+
+# Daily stats (KST 00:00 자동 리셋)
+from datetime import datetime, timezone, timedelta
+kst_today = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d")
+if cum.get("daily_date") != kst_today:
+    cum["daily_input"] = 0
+    cum["daily_output"] = 0
+    cum["daily_tasks"] = 0
+    cum["daily_date"] = kst_today
+cum["daily_input"] = cum.get("daily_input", 0) + usage.get("input", 0)
+cum["daily_output"] = cum.get("daily_output", 0) + usage.get("output", 0)
+cum["daily_tasks"] = cum.get("daily_tasks", 0) + 1
+
+cost = usage.get("cost")
+cum["cost"] += cost.get("total", 0.0) if isinstance(cost, dict) else 0.0
+cum["totalDuration"] = cum.get("totalDuration", 0) + gen_dur
+cum["lastTps"] = tps
+cum["lastTtft"] = ttft_ms
+cum["ttftSum"] = cum.get("ttftSum", 0) + ttft_ms
+cum["ttftCount"] = cum.get("ttftCount", 0) + (1 if ttft_ms > 0 else 0)
+cum["avgTtft"] = round(cum["ttftSum"] / cum["ttftCount"]) if cum["ttftCount"] > 0 else 0
+
+with open(usage_file, "w") as f:
+    json.dump(cum, f)
+PYEOF
+}
+
+_gen_id() {
+  date +%s%N | shasum -a 256 | head -c 12
+}
+
+_pi_flags() {
+  local flags="-p --mode json --no-session"
+  [[ -n "$MODEL" ]] && flags+=" --model $MODEL"
+  [[ -n "$THINKING" ]] && flags+=" --thinking $THINKING"
+  echo "$flags"
+}
+
+_count_running() {
+  local count=0
+  for d in "$TASK_DIR"/*/; do
+    [[ -f "$d/status" ]] && [[ "$(cat "$d/status")" == "running" ]] && {
+      local pid
+      pid=$(cat "$d/pid" 2>/dev/null || echo "")
+      [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && ((count++))
+    }
+  done
+  echo "$count"
+}
+
+_update_statuses() {
+  for d in "$TASK_DIR"/*/; do
+    [[ -f "$d/status" ]] || continue
+    local st
+    st=$(cat "$d/status")
+    [[ "$st" != "running" ]] && continue
+    local pid
+    pid=$(cat "$d/pid" 2>/dev/null || echo "")
+    [[ -z "$pid" ]] && continue
+    if ! kill -0 "$pid" 2>/dev/null; then
+      if [[ -f "$d/output.json" ]] && [[ -s "$d/output.json" ]]; then
+        echo "completed" > "$d/status"
+      else
+        echo "failed" > "$d/status"
+      fi
+      wait "$pid" 2>/dev/null
+      echo "$?" > "$d/exit_code"
+    fi
+  done
+}
+
+cmd_check() {
+  if ! command -v pi >/dev/null 2>&1; then
+    echo '{"ok":false,"error":"pi not found. Install: npm i -g @mariozechner/pi-coding-agent"}'
+    exit 1
+  fi
+  local ver
+  ver=$(pi --version 2>/dev/null || echo "unknown")
+  echo "{\"ok\":true,\"version\":\"$ver\"}"
+}
+
+cmd_run() {
+  local prompt="$1"
+  shift
+  local bg=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --bg) bg=true ;;
+      --model) MODEL="$2"; shift ;;
+      --thinking) THINKING="$2"; shift ;;
+      --timeout) TIMEOUT="$2"; shift ;;
+    esac
+    shift
+  done
+
+  if ! command -v pi >/dev/null 2>&1; then
+    echo '{"error":"pi not found"}' >&2
+    exit 1
+  fi
+
+  local task_id
+  task_id=$(_gen_id)
+  local task_path="$TASK_DIR/$task_id"
+  mkdir -p "$task_path"
+
+  cat > "$task_path/meta.json" << EOF
+{"prompt":"$(echo "$prompt" | sed 's/"/\\"/g' | head -c 500)","cwd":"$(pwd)","started_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","model":"${MODEL:-default}","thinking":"${THINKING:-default}"}
+EOF
+
+  local flags
+  flags=$(_pi_flags)
+
+  if [[ "$bg" == true ]]; then
+    # 동시 실행 수 체크
+    local running
+    running=$(_count_running)
+    if (( running >= MAX_CONCURRENT )); then
+      echo "queued" > "$task_path/status"
+      echo "{\"task_id\":\"$task_id\",\"status\":\"queued\",\"reason\":\"max concurrent ($MAX_CONCURRENT) reached\"}"
+      return
+    fi
+
+    echo "running" > "$task_path/status"
+    # nohup detached — Claude Code 세션과 독립
+    nohup bash -c "_st=\$(python3 -c 'import time;print(time.time())'); echo \$\$ > '$task_path/pid'; pi $flags '$prompt' > '$task_path/output.json' 2> '$task_path/stderr.log'; echo \$? > '$task_path/exit_code'; _wd=\$(python3 -c \"import time;print(round(time.time()-\${_st},3))\"); if [ -s '$task_path/output.json' ]; then echo completed > '$task_path/status'; '$0' _update_usage_file '$task_path/output.json' \"\$_wd\"; else echo failed > '$task_path/status'; fi; '$0' kick-queue" &>/dev/null &
+    echo "{\"task_id\":\"$task_id\",\"status\":\"running\"}"
+  else
+    echo "running" > "$task_path/status"
+    echo $$ > "$task_path/pid"
+    _timeout_cmd() {
+      if command -v timeout >/dev/null 2>&1; then timeout "$@"
+      elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$@"
+      else shift; "$@"; fi
+    }
+    local _start_ts
+    _start_ts=$(python3 -c "import time; print(time.time())")
+    if _timeout_cmd "$TIMEOUT" pi $flags "$prompt" > "$task_path/output.json" 2> "$task_path/stderr.log"; then
+      local _wall_dur
+      _wall_dur=$(python3 -c "import time; print(round(time.time() - ${_start_ts}, 3))")
+      echo "completed" > "$task_path/status"
+      echo "0" > "$task_path/exit_code"
+      _update_usage "$task_path/output.json" "$_wall_dur"
+      cat "$task_path/output.json"
+    else
+      local ec=$?
+      echo "$ec" > "$task_path/exit_code"
+      echo "failed" > "$task_path/status"
+      echo "{\"error\":\"pi exited with code $ec\",\"task_id\":\"$task_id\"}" >&2
+      cat "$task_path/stderr.log" >&2
+      exit 1
+    fi
+  fi
+}
+
+cmd_status() {
+  _update_statuses
+  local task_id="${1:-}"
+  if [[ -n "$task_id" ]]; then
+    local task_path="$TASK_DIR/$task_id"
+    if [[ ! -d "$task_path" ]]; then
+      echo "{\"error\":\"task not found: $task_id\"}"
+      exit 1
+    fi
+    local st
+    st=$(cat "$task_path/status" 2>/dev/null || echo "unknown")
+    local meta
+    meta=$(cat "$task_path/meta.json" 2>/dev/null || echo "{}")
+    echo "{\"task_id\":\"$task_id\",\"status\":\"$st\",\"meta\":$meta}"
+  else
+    echo "["
+    local first=true
+    for d in "$TASK_DIR"/*/; do
+      [[ -f "$d/status" ]] || continue
+      local id
+      id=$(basename "$d")
+      local st
+      st=$(cat "$d/status" 2>/dev/null || echo "unknown")
+      local started
+      started=$(python3 -c "import json; print(json.load(open('$d/meta.json'))['started_at'])" 2>/dev/null || echo "unknown")
+      [[ "$first" == true ]] && first=false || echo ","
+      echo "  {\"task_id\":\"$id\",\"status\":\"$st\",\"started_at\":\"$started\"}"
+    done
+    echo "]"
+  fi
+}
+
+cmd_result() {
+  local task_id="$1"
+  local task_path="$TASK_DIR/$task_id"
+  if [[ ! -d "$task_path" ]]; then
+    echo "{\"error\":\"task not found: $task_id\"}" >&2
+    exit 1
+  fi
+  _update_statuses
+  local st
+  st=$(cat "$task_path/status" 2>/dev/null || echo "unknown")
+  if [[ "$st" == "running" ]]; then
+    echo "{\"task_id\":\"$task_id\",\"status\":\"running\",\"message\":\"still in progress\"}"
+    return
+  fi
+  if [[ -f "$task_path/output.json" ]] && [[ -s "$task_path/output.json" ]]; then
+    cat "$task_path/output.json"
+  else
+    echo "{\"task_id\":\"$task_id\",\"status\":\"$st\",\"error\":\"no output\"}"
+    [[ -f "$task_path/stderr.log" ]] && echo "--- stderr ---" >&2 && cat "$task_path/stderr.log" >&2
+    exit 1
+  fi
+}
+
+cmd_cancel() {
+  local task_id="$1"
+  local task_path="$TASK_DIR/$task_id"
+  if [[ ! -d "$task_path" ]]; then
+    echo "{\"error\":\"task not found: $task_id\"}" >&2
+    exit 1
+  fi
+  local pid
+  pid=$(cat "$task_path/pid" 2>/dev/null || echo "")
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  fi
+  echo "cancelled" > "$task_path/status"
+  echo "{\"task_id\":\"$task_id\",\"status\":\"cancelled\"}"
+}
+
+# Main dispatch
+mkdir -p "$TASK_DIR"
+
+cmd_usage() {
+  # 누적 토큰 사용량 출력
+  local fmt="${1:-json}"
+  if [[ ! -f "$USAGE_FILE" ]]; then
+    [[ "$fmt" == "statusline" ]] && echo "pi:0" && return
+    echo '{"input":0,"output":0,"totalTokens":0,"tasks":0,"cost":0.0}'
+    return
+  fi
+  if [[ "$fmt" == "statusline" ]]; then
+    python3 -c "
+import json
+def fmt(n):
+    if n < 1000: return str(n)
+    if n < 1_000_000: return f'{n/1000:.1f}k'
+    return f'{n/1_000_000:.2f}M'
+with open('$USAGE_FILE') as f:
+    d = json.load(f)
+i, o = d.get('input', 0), d.get('output', 0)
+tps = d.get('lastTps', 0)
+tps_s = f' {tps:.1f}t/s' if tps > 0 else ''
+print(f'pi:i{fmt(i)}/o{fmt(o)}{tps_s}')
+" 2>/dev/null
+  else
+    cat "$USAGE_FILE"
+  fi
+}
+
+# 백그라운드 프로세스에서 usage 업데이트용 내부 커맨드
+cmd__update_usage_file() {
+  _update_usage "$1" "${2:-0}"
+}
+
+cmd_kick_queue() {
+  # 큐된 태스크 중 오래된 순으로 MAX_CONCURRENT 한도 내에서 실행
+  _update_statuses
+  local running
+  running=$(_count_running)
+  (( running >= MAX_CONCURRENT )) && return
+
+  # 가장 오래된 queued 태스크부터 kick (FIFO)
+  for d in $(ls -tdr "$TASK_DIR"/*/); do
+    [[ -f "$d/status" ]] || continue
+    [[ "$(cat "$d/status")" == "queued" ]] || continue
+    local id prompt flags
+    id=$(basename "$d")
+    prompt=$(python3 -c "import json; print(json.load(open('${d}meta.json'))['prompt'])" 2>/dev/null)
+    [[ -z "$prompt" ]] && continue
+    flags=$(_pi_flags)
+    echo "running" > "$d/status"
+    nohup bash -c "_st=\$(python3 -c 'import time;print(time.time())'); echo \$\$ > '$d/pid'; pi $flags '$prompt' > '${d}output.json' 2> '${d}stderr.log'; echo \$? > '${d}exit_code'; _wd=\$(python3 -c \"import time;print(round(time.time()-\${_st},3))\"); if [ -s '${d}output.json' ]; then echo completed > '$d/status'; '$0' _update_usage_file '${d}output.json' \"\$_wd\"; else echo failed > '$d/status'; fi; '$0' kick-queue" &>/dev/null &
+    running=$((running+1))
+    (( running >= MAX_CONCURRENT )) && return
+  done
+}
+
+cmd_cleanup() {
+  # 완료/실패/취소된 태스크 중 24시간 지난 것 삭제. running은 건드리지 않음.
+  local cutoff count=0
+  cutoff=$(python3 -c "import time; print(time.time() - 86400)")
+  _update_statuses
+  for d in "$TASK_DIR"/*/; do
+    [[ -f "$d/status" ]] || continue
+    local st
+    st=$(cat "$d/status")
+    [[ "$st" == "running" || "$st" == "queued" ]] && continue
+    local started
+    started=$(python3 -c "
+import json
+try:
+    d = json.load(open('${d}meta.json'))
+    from datetime import datetime
+    t = datetime.fromisoformat(d['started_at'].replace('Z','+00:00')).timestamp()
+    print(t)
+except:
+    print(0)
+" 2>/dev/null)
+    if python3 -c "exit(0 if float('${started}') < float('${cutoff}') else 1)" 2>/dev/null; then
+      rm -rf "$d"
+      ((count++))
+    fi
+  done
+  echo "[pi-plugin] cleanup: removed $count old tasks"
+}
+
+case "${1:-help}" in
+  check)  cmd_check ;;
+  run)    shift; cmd_run "$@" ;;
+  status) shift; cmd_status "${1:-}" ;;
+  result) shift; cmd_result "$1" ;;
+  cancel) shift; cmd_cancel "$1" ;;
+  usage)  shift; cmd_usage "${1:-json}" ;;
+  cleanup) cmd_cleanup ;;
+  kick-queue) cmd_kick_queue ;;
+  _update_usage_file) shift; cmd__update_usage_file "$1" "${2:-0}" ;;
+  help|*)
+    echo "Usage: pi-cc <command> [args]"
+    echo "  check              Check pi installation"
+    echo "  run <prompt>       Run pi (add --bg for background)"
+    echo "  status [id]        Show task status"
+    echo "  result <id>        Get task result"
+    echo "  cancel <id>        Cancel running task"
+    echo "  usage [json|statusline]  Show cumulative token usage"
+    echo "  cleanup            Remove completed tasks older than 24h"
+    ;;
+esac
