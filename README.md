@@ -15,7 +15,7 @@ Add the marketplace in Claude Code:
 Install the plugin:
 
 ```
-/plugin install pi@boxby-pi
+/plugin install pi@pi-plugin-cc
 ```
 
 Reload plugins:

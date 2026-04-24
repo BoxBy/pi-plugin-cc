@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "boxby-pi",
+  "name": "pi-plugin-cc",
   "description": "Claude Code plugin for pi coding agent — delegate reviews, brainstorming, and cross-verification to pi",
   "owner": {
     "name": "BoxBy"
