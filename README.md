@@ -6,15 +6,34 @@ Claude Code plugin for [pi coding agent](https://github.com/badlogic/pi-mono). D
 
 ## Install
 
-```bash
-# 1. Install pi
-npm i -g @mariozechner/pi-coding-agent
+Add the marketplace in Claude Code:
 
-# 2. Install plugin
-claude plugin add --url https://github.com/BoxBy/pi-plugin-cc.git
+```
+/plugin marketplace add BoxBy/pi-plugin-cc
+```
 
-# 3. Run setup (optional — verifies installation and initializes usage tracking)
+Install the plugin:
+
+```
+/plugin install pi@boxby-pi
+```
+
+Reload plugins:
+
+```
+/reload-plugins
+```
+
+Then run:
+
+```
 /pi:setup
+```
+
+`/pi:setup` will tell you whether pi is ready. If pi is missing and npm is available, install it with:
+
+```bash
+npm i -g @mariozechner/pi-coding-agent
 ```
 
 ## Commands
